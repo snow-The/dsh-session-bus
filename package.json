@@ -1,0 +1,73 @@
+{
+  "name": "@snow-the/dsh-session-bus",
+  "version": "0.1.0",
+  "description": "Thin client for the Local Session Bus: five tools that forward to dsh-busd over loopback. Owns no state, touches no database and no session log.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "message-bus",
+    "deepseek-harness"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --log-level=warning",
+    "pretest": "npm run build",
+    "test": "node --test test/session-bus.test.mjs test/fuzz.test.mjs test/receiver.test.mjs test/wake.test.mjs",
+    "fuzz": "node --test --test-name-pattern=fuzz test/fuzz.test.mjs"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": [
+        "0.2.1-rc.5"
+      ],
+      "verifiedAgainst": "0.2.1-rc.5"
+    },
+    "assumes": [
+      {
+        "kind": "path",
+        "value": "~/.dsh/session-bus/port",
+        "note": "daemon 監聽埠檔；缺了只是 unknown，不是錯"
+      },
+      {
+        "kind": "path",
+        "value": "~/.dsh/session-bus/token",
+        "note": "總線 token；沒有它所有工具都會 401"
+      }
+    ],
+    "capabilities": [
+      {
+        "service": "gas.bus",
+        "required": false,
+        "note": "daemon 不在就只是離線，插件本身仍可載入"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/snow-The/dsh-own-plugins.git",
+    "directory": "packages/dsh-session-bus"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.1-rc.5"
+  }
+}

@@ -1,0 +1,7 @@
+# dsh-session-bus bundle layer: the Local Session Bus thin client.
+# The daemon (dsh-busd) is a separate Go process owned by the GAS side; this
+# plugin only forwards to it over loopback. Nothing mounts if the daemon is
+# absent — the tools answer UNAVAILABLE instead of failing to load.
+- insert:
+    - id: session-bus
+      name: '@snow-the/dsh-session-bus'

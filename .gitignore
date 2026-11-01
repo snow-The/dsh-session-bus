@@ -1,0 +1,8 @@
+node_modules/
+*.log
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+session-bus/
+.env*
