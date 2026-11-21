@@ -522,18 +522,21 @@ function apply(ctx, options) {
   });
   ctx.tools.register({
     name: "session_bus_room",
-    description: "Rooms on the bus: a shared place several sessions talk in, where the daemon assigns ONE monotonic room_seq (clients never compute it). action: create | list | join | leave | members | send | read | ack. visibility is open|member (moderated is not implemented by the daemon and is refused). A room never carries a decision \u2014 attach `contract_ref` instead. NOT_MEMBER is a 403 about membership, not about your token.",
+    description: "Rooms on the bus: a shared place several sessions talk in, where the daemon assigns ONE monotonic room_seq (clients never compute it). action: create | list | send | read | ack. Membership is FIXED AT CREATE TIME via `participants` \u2014 the bus has no join/leave/members verbs (v1 narrowed them away), so a room cannot gain or lose a member afterwards. There is no `visibility` either: every room is member-only, and sending it is a 400, not a silent ignore. A room never carries a decision \u2014 attach `contract_ref` instead. NOT_MEMBER is a 403 about membership, not about your token.",
     parameters: {
       properties: {
         action: {
-          description: "create | list | join | leave | members | send | read | ack",
-          enum: ["create", "list", "join", "leave", "members", "send", "read", "ack"],
+          description: "create | list | send | read | ack",
+          enum: ["create", "list", "send", "read", "ack"],
           type: "string"
         },
         room: { description: "Room id (room-\u2026). Required by everything except create and list.", type: "string" },
         name: { description: "create: room name.", type: "string" },
         purpose: { description: "create: chat | work. Decisions are contracts, not purposes.", enum: ["chat", "work"], type: "string" },
-        visibility: { description: "create: open | member.", enum: ["open", "member"], type: "string" },
+        participants: {
+          description: "create: session ids to include besides you (you are always a member). FIXED AT CREATE TIME \u2014 there is no join afterwards, so a room created without a peer can never gain one. Use this instead of creating a room and hoping the peer joins.",
+          type: "array"
+        },
         body: { description: "send: message body.", type: "string" },
         content_ref: { description: "send: attach instead of truncating (same envelope as the mailbox).", type: "object" },
         mentions: { description: "send: array of session ids, role:<name>, or all.", type: "array" },
@@ -548,10 +551,19 @@ function apply(ctx, options) {
     output: textOutput(),
     execute: async (args, exec) => {
       const input = args;
-      const ACTIONS = ["create", "list", "join", "leave", "members", "send", "read", "ack"];
+      const ACTIONS = ["create", "list", "send", "read", "ack"];
       const action = typeof input.action === "string" ? input.action : "";
       if (!ACTIONS.includes(action)) {
-        return fail("BUS_ERROR", `session_bus_room requires action to be one of ${ACTIONS.join(", ")}; got ${JSON.stringify(input.action ?? null)}`);
+        const REMOVED = {
+          join: "membership is fixed at create time \u2014 pass `participants` to create instead",
+          leave: "membership is fixed at create time; a room cannot lose a member",
+          members: "the bus does not expose a member list (v1 narrowed it away)"
+        };
+        const hint = REMOVED[action];
+        return fail(
+          "BUS_ERROR",
+          hint ? `session_bus_room action=${action} no longer exists: ${hint}` : `session_bus_room requires action to be one of ${ACTIONS.join(", ")}; got ${JSON.stringify(input.action ?? null)}`
+        );
       }
       const room = typeof input.room === "string" ? input.room.trim() : "";
       if (action !== "create" && action !== "list" && room === "") {
@@ -563,17 +575,21 @@ function apply(ctx, options) {
       if (action === "ack" && !(typeof input.up_to_room_seq === "number" && Number.isFinite(input.up_to_room_seq))) {
         return fail("BUS_ERROR", "action=ack requires `up_to_room_seq` as a number");
       }
+      if (input.visibility !== void 0) {
+        return fail("BUS_ERROR", "session_bus_room has no `visibility`: every room is member-only, and membership is fixed at create time via `participants`");
+      }
       const prepared = await prepare(options, exec, timeoutMs);
       if (isFail(prepared)) return prepared;
       const { token } = prepared;
       const { env } = prepared;
       const session = prepared.sessionId;
       if (action === "create") {
+        const participants = Array.isArray(input.participants) ? input.participants.filter((p) => typeof p === "string" && p.trim() !== "").map((p) => p.trim()) : [];
         const payload = {
           name: typeof input.name === "string" ? input.name : "",
           purpose: typeof input.purpose === "string" ? input.purpose : "chat",
           session,
-          ...typeof input.visibility === "string" ? { visibility: input.visibility } : {}
+          ...participants.length > 0 ? { participants } : {}
         };
         const outcome2 = await call(env, token, "POST", ROUTES.rooms, {}, payload, timeoutMs);
         if (isFail(outcome2)) return outcome2;
@@ -583,16 +599,6 @@ function apply(ctx, options) {
         const outcome2 = await call(env, token, "GET", ROUTES.rooms, { session }, void 0, timeoutMs);
         if (isFail(outcome2)) return outcome2;
         return { ok: true, result: outcome2.body };
-      }
-      if (action === "join" || action === "leave") {
-        const outcome2 = await call(env, token, "POST", roomPath(room, `/${action}`), {}, { session }, timeoutMs);
-        if (isFail(outcome2)) return outcome2;
-        return { action, ok: true, receipt: outcome2.body, room };
-      }
-      if (action === "members") {
-        const outcome2 = await call(env, token, "GET", roomPath(room, "/members"), {}, void 0, timeoutMs);
-        if (isFail(outcome2)) return outcome2;
-        return { ok: true, result: outcome2.body, room };
       }
       if (action === "send") {
         const payload = {
@@ -805,7 +811,12 @@ async function wakePendingPrompts(view, env, token, timeoutMs, woken, live, exce
     ].join("\n");
     try {
       agent.send(
-        { content: [{ text, type: "text" }], id: `bus-wake-${String(fresh[0].msg_id)}`, role: "user", source: { kind: "user" } },
+        // 門鈴訊息不是「使用者說的」：role 仍是 user（要觸發一輪），但 source.kind 必須申報自己。
+        // 原本寫 source:{kind:'user'}，等於冒用人類保留的 kind——門鈴會變成 session log 裡一條
+        // 無法辨識的 user/message，而 dsh-acp-memory 用它當「真人發言」的錨點
+        // （acp-memory/dist:1237 只認 source.kind==='user'），於是錨點被門鈴污染。
+        // 官方對照：@deepseek-ai/dsh-schedule/lib/index.js:2556 用 source:{kind:'schedule'}。
+        { content: [{ text, type: "text" }], id: `bus-wake-${String(fresh[0].msg_id)}`, role: "user", source: { kind: "plugin:dsh-session-bus" } },
         "next-turn",
         true
       );

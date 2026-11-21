@@ -540,7 +540,12 @@ test('room: NOT_MEMBER (403) is a membership problem, never a token problem', as
   try {
     const ctx = makeCtx()
     apply(ctx, { dshHome: home })
-    const result = await ctx.byName('session_bus_room').execute({ action: 'members', room: 'room-abc123' }, AGENT_EXEC)
+    // `read` rather than the old `members`: the bus has no /members route at all
+    // (GAS rooms_test.go:124-126 refuses it), so the previous version of this test
+    // was green for the wrong reason — the mock answers 403 for ANY path, so it
+    // never proved the verb existed. What this test is actually about is the 403
+    // mapping, and `read` exercises that against a route that really exists.
+    const result = await ctx.byName('session_bus_room').execute({ action: 'read', room: 'room-abc123' }, AGENT_EXEC)
     assert.equal(result.ok, false)
     // The whole point: this is NOT UNAUTHORIZED. Sending an operator to re-read
     // the token file for a membership problem is a wrong answer that looks right.
@@ -551,6 +556,35 @@ test('room: NOT_MEMBER (403) is a membership problem, never a token problem', as
     await daemon.stop()
     cleanup(home)
   }
+})
+
+test('room: the verbs the bus narrowed away are refused with a reason, not a generic error', async () => {
+  const ctx = makeCtx()
+  apply(ctx, { dshHome: makeHome(1) })
+  // join/leave/members do not exist on the bus any more. A caller that read an
+  // older schema must be told WHY, otherwise "not one of create, list, …" reads
+  // like a broken tool instead of a removed verb.
+  for (const action of ['join', 'leave', 'members']) {
+    const result = await ctx.byName('session_bus_room').execute({ action, room: 'room-abc123' }, AGENT_EXEC)
+    assert.equal(result.ok, false, `${action} must fail`)
+    assert.equal(result.code, 'BUS_ERROR')
+    assert.match(result.message, /no longer exists/, `${action} must say the verb is gone`)
+    assert.match(result.message, /participants|member/, `${action} must point at the replacement`)
+  }
+})
+
+test('room: visibility is refused locally, because the daemon 400s it', async () => {
+  const ctx = makeCtx()
+  apply(ctx, { dshHome: makeHome(1) })
+  // Silently dropping `visibility` would let the caller believe it set something.
+  const result = await ctx.byName('session_bus_room').execute(
+    { action: 'create', name: 'r', visibility: 'open' },
+    AGENT_EXEC,
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'BUS_ERROR')
+  assert.match(result.message, /visibility/)
+  assert.match(result.message, /participants/)
 })
 
 test('send: NO_GRANT (403) is a permission problem, never a token problem', async () => {
